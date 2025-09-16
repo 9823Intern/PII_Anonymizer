@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PII Anonymizer/Deanonymizer</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><i class="fas fa-shield-alt"></i> PII Processor</h1>
+            <p>Secure anonymization and deanonymization of sensitive documents</p>
+        </header>
+
+        <div class="mode-selector">
+            <button id="anonymize-btn" class="mode-btn active" data-mode="anonymize">
+                <i class="fas fa-eye-slash"></i> Anonymize
+            </button>
+            <button id="deanonymize-btn" class="mode-btn" data-mode="deanonymize">
+                <i class="fas fa-eye"></i> Deanonymize
+            </button>
+        </div>
+
+        <div class="workspace">
+            <!-- Anonymize Mode -->
+            <div id="anonymize-mode" class="mode-content active">
+                <div class="panel-container">
+                    <div class="input-panel">
+                        <h3><i class="fas fa-file-upload"></i> Input Document</h3>
+                        <div id="anonymize-dropzone" class="dropzone">
+                            <div class="dropzone-content">
+                                <i class="fas fa-cloud-upload-alt"></i>
+                                <p>Drop files here or <span class="browse-link">browse</span></p>
+                                <p class="file-types">Supports: .txt, .pdf, .xlsx, .docx</p>
+                            </div>
+                            <input type="file" id="anonymize-file-input" accept=".txt,.pdf,.xlsx,.docx" hidden>
+                        </div>
+                        
+                        <div class="text-input-section">
+                            <label for="anonymize-text-input">Or paste text directly:</label>
+                            <textarea id="anonymize-text-input" placeholder="Enter sensitive text here..."></textarea>
+                        </div>
+
+                        <div class="options">
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="use-llm" checked>
+                                <span class="checkmark"></span>
+                                Use AI for better detection (requires Ollama)
+                            </label>
+                        </div>
+
+                        <button id="anonymize-process-btn" class="process-btn">
+                            <i class="fas fa-lock"></i> Anonymize
+                        </button>
+                    </div>
+
+                    <div class="output-panel">
+                        <h3><i class="fas fa-file-download"></i> Anonymized Output</h3>
+                        <div class="output-section">
+                            <div class="output-header">
+                                <span>Anonymized Text</span>
+                                <button id="copy-anonymized" class="copy-btn" title="Copy to clipboard">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <textarea id="anonymized-output" readonly placeholder="Anonymized text will appear here..."></textarea>
+                        </div>
+
+                        <div class="output-section">
+                            <div class="output-header">
+                                <span>Mapping File</span>
+                                <button id="download-mapping" class="download-btn" title="Download mapping">
+                                    <i class="fas fa-download"></i>
+                                </button>
+                            </div>
+                            <textarea id="mapping-output" readonly placeholder="Mapping JSON will appear here..."></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Deanonymize Mode -->
+            <div id="deanonymize-mode" class="mode-content">
+                <div class="panel-container">
+                    <div class="input-panel">
+                        <h3><i class="fas fa-file-upload"></i> Anonymized Document</h3>
+                        <div id="deanonymize-dropzone" class="dropzone">
+                            <div class="dropzone-content">
+                                <i class="fas fa-cloud-upload-alt"></i>
+                                <p>Drop anonymized files here or <span class="browse-link">browse</span></p>
+                                <p class="file-types">Supports: .txt, .pdf, .xlsx, .docx</p>
+                            </div>
+                            <input type="file" id="deanonymize-file-input" accept=".txt,.pdf,.xlsx,.docx" hidden>
+                        </div>
+
+                        <div class="text-input-section">
+                            <label for="deanonymize-text-input">Or paste anonymized text:</label>
+                            <textarea id="deanonymize-text-input" placeholder="Enter text with placeholders like [PERSON1], [DATE1]..."></textarea>
+                        </div>
+
+                        <h3><i class="fas fa-key"></i> Mapping File</h3>
+                        <div id="mapping-dropzone" class="dropzone small">
+                            <div class="dropzone-content">
+                                <i class="fas fa-file-code"></i>
+                                <p>Drop mapping.json here or <span class="browse-link">browse</span></p>
+                            </div>
+                            <input type="file" id="mapping-file-input" accept=".json" hidden>
+                        </div>
+
+                        <div class="text-input-section">
+                            <label for="mapping-text-input">Or paste mapping JSON:</label>
+                            <textarea id="mapping-text-input" placeholder='{"Original Text": "[PLACEHOLDER1]", ...}'></textarea>
+                        </div>
+
+                        <button id="deanonymize-process-btn" class="process-btn">
+                            <i class="fas fa-unlock"></i> Deanonymize
+                        </button>
+                    </div>
+
+                    <div class="output-panel">
+                        <h3><i class="fas fa-file-download"></i> Restored Output</h3>
+                        <div class="output-section">
+                            <div class="output-header">
+                                <span>Restored Text</span>
+                                <button id="copy-restored" class="copy-btn" title="Copy to clipboard">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <textarea id="restored-output" readonly placeholder="Restored text will appear here..."></textarea>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <div id="status-message">Ready</div>
+            <div id="processing-indicator" class="hidden">
+                <i class="fas fa-spinner fa-spin"></i> Processing...
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html> 

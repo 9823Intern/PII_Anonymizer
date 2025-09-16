@@ -1,199 +1,187 @@
-import spacy
-import re
+import re, json, hashlib, hmac, base64
+from collections import namedtuple
 
-nlp = spacy.load("en_core_web_lg")
+Span = namedtuple("Span", ["start","end","label"])
 
-class Anonymizer:
-    def __init__(self):
-        self.doc = None
-        # Counters for consistent anonymization
-        self.entity_counters = {}
-        # Custom mapping for more semantic labels
-        self.label_mapping = {
-            'PERSON': 'PERSON',
-            'CARDINAL': 'NUMBER', 
-            'FAC': 'ADDRESS',
-            'GPE': 'LOCATION',
-            'ORG': 'ORGANIZATION',
-            # 'DATE': 'DATE',
-            # 'TIME': 'TIME',
-            'MONEY': 'MONEY',
-            'PHONE': 'PHONE',
-            'BANK_ACCOUNT': 'BANK_ACCOUNT',
-            'ROUTING_NUMBER': 'ROUTING_NUMBER',
-            'SSN': 'SSN',
-            'ZIP': 'ZIP',
-            'CREDIT_CARD': 'CREDIT_CARD'
-        }
+# 1) Regex detectors (expand as needed)
+REGEXES = {
+    "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    "SSN":   re.compile(r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b"),
+    # Removed PHONE, CC, IP, DATE - let LLM handle these with better context
+}
 
-    # def anonymize(self, data):
-    #     self.data = data
-    #     return self.data
+def find_regex_spans(text):
+    spans = []
+    for label, rx in REGEXES.items():
+        for m in rx.finditer(text):
+            spans.append(Span(m.start(), m.end(), label))
+    return spans
+
+# 2) Optional: ask Ollama for extra spans (e.g., PERSON/ORG/LOC)
+import requests
+
+def ask_ollama_for_spans(text, model="llama3.2:3b"):
+    prompt = f"""Extract PII entities from text. Return ONLY the JSON object below, nothing else:
+
+Text to analyze:
+{text}
+
+Find these entity types:
+- PERSON: Person names (first, last, full names) like "John A Doe", "Jane Smith", "Mr. Doe"
+- ORG: Organization names like "Globex LLC"
+- LOCATION: Addresses, cities, states like "742 Evergreen Terrace, Apt. 4B, Springfield, IL 62704"
+- PHONE: Phone numbers like "(415) 555-2672" 
+- DATE: Dates like "July 22, 1986", "07/22/1986"
+- CC: Credit card numbers
+- IP: IP addresses
+
+Return only this JSON format:
+{{"entities": [{{"text": "exact text from document", "label": "PERSON"}}]}}
+
+Instructions:
+- "text" must be the EXACT text as it appears in the document
+- Focus on proper nouns and names for PERSON entities
+- Do NOT include emails, SSNs, or text that contains multiple entity types
+- ONLY return the JSON object, no other text"""
+    r = requests.post("http://localhost:11434/api/generate", json={
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0}
+    })
+    r.raise_for_status()
+    out = r.json()["response"]
+    # print(f"DEBUG - LLM raw response: {out}")  # Uncomment for debugging
     
-    # def anonymize_column(self, column):
-    #     return column.apply(self.anonymize_value)
+    # Try to extract JSON from response (in case there's extra text)
+    try:
+        # First try parsing the whole response
+        data = json.loads(out)
+    except:
+        # If that fails, try to find JSON object in the response
+        import re
+        json_match = re.search(r'\{.*?"entities".*?\}', out, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+            except:
+                print(f"DEBUG - Could not parse extracted JSON: {json_match.group()}")
+                return []
+        else:
+            print(f"DEBUG - No JSON found in response")
+            return []
     
-    # def anonymize_value(self, value):
-    #     return value
-    def _spans_overlap(self, a_start, a_end, b_start, b_end):
-        return a_start < b_end and b_start < a_end
-
-    def _find_custom_spans(self, text):
-        spans = []
-        # SSN: 123-45-6789
-        ssn_pattern = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
-        # US phone numbers
-        phone_pattern = re.compile(r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?|\d{3}[-.\s])\d{3}[-.\s]?\d{4}(?!\d)")
-        # Credit card: 4-4-4-4 with spaces or dashes
-        cc_pattern = re.compile(r"(?<!\d)(?:\d{4}[-\s]){3}\d{4}(?!\d)")
-        # ZIP: capture only the zip after a US state code (to avoid generic 5-digits)
-        zip_pattern = re.compile(r"\b(?:A[KLRZ]|C[AOT]|D[EC]|F[LM]|G[AU]|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|P[ARW]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])\s+(\d{5}(?:-\d{4})?)\b")
-        # Bank/routing candidates
-        bank_digits_pattern = re.compile(r"(?<!\d)\d{10,12}(?!\d)")
-        routing_digits_pattern = re.compile(r"(?<!\d)\d{9}(?!\d)")
-
-        for m in ssn_pattern.finditer(text):
-            spans.append((m.start(), m.end(), 'SSN'))
-        for m in phone_pattern.finditer(text):
-            spans.append((m.start(), m.end(), 'PHONE'))
-        for m in cc_pattern.finditer(text):
-            spans.append((m.start(), m.end(), 'CREDIT_CARD'))
-        for m in zip_pattern.finditer(text):
-            spans.append((m.start(1), m.end(1), 'ZIP'))
-
-        # Proximity-based labeling for bank account and routing numbers
-        def has_keyword_before(idx, keywords, window=60):
-            start = max(0, idx - window)
-            ctx = text[start:idx].lower()
-            return any(k in ctx for k in keywords)
-
-        for m in routing_digits_pattern.finditer(text):
-            if has_keyword_before(m.start(), ["routing", "aba", "rtg", "transit"]):
-                spans.append((m.start(), m.end(), 'ROUTING_NUMBER'))
-
-        for m in bank_digits_pattern.finditer(text):
-            if has_keyword_before(m.start(), ["account", "acct", "iban", "account number"]):
-                spans.append((m.start(), m.end(), 'BANK_ACCOUNT'))
-
-        return spans
-
-    def _find_label_spans(self, text):
-        """Find uppercase label tokens like SSN, DOB, EIN, etc., and generic 2–5 letter labels
-        followed by a colon or value; these should be preserved (not anonymized)."""
-        spans = []
-        # Specific known labels
-        known_labels = ["SSN", "DOB", "EIN", "TIN", "ZIP"]
-        specific_re = re.compile(r"\b(?:" + "|".join(known_labels) + r")\b")
-        for m in specific_re.finditer(text):
-            spans.append((m.start(), m.end()))
-
-        # Generic uppercase labels 2–5 chars before colon or digits
-        generic_re = re.compile(r"\b([A-Z]{2,5})\b(?=\s*:|\s*[-#]|\s+\d)")
-        for m in generic_re.finditer(text):
-            spans.append((m.start(1), m.end(1)))
-        return spans
-
-    def anonymize_data(self, file):
-        self.doc = nlp(file)
-        anonymized_doc = file
+    # print(f"DEBUG - LLM parsed JSON: {data}")  # Uncomment for debugging
+    
+    # Convert text-based entities to spans by finding their positions
+    spans = []
+    for entity in data.get("entities", []):
+        entity_text = entity["text"]
+        label = entity["label"]
         
-        # Reset counters for each document
-        self.entity_counters = {}
+        # Find all occurrences of this text in the document
+        start = 0
+        while True:
+            pos = text.find(entity_text, start)
+            if pos == -1:
+                break
+            spans.append(Span(pos, pos + len(entity_text), label))
+            start = pos + 1  # Look for next occurrence
+    
+    return spans
 
-        # 1) Find custom regex spans (priority over NER)
-        custom_spans = self._find_custom_spans(file)
-        label_spans = self._find_label_spans(file)
+# 3) Deterministic surrogate generators (format-preserving where possible)
+SECRET_SALT = b"pii-anonymizer-default-salt-change-in-production"
 
-        # 2) Keep spaCy spans that do not overlap custom spans
-        def overlaps_any(s, e, spans):
-            for cs, ce, _ in spans:
-                if self._spans_overlap(s, e, cs, ce):
-                    return True
-            return False
+def dhash(s: str, label: str) -> int:
+    return int.from_bytes(hmac.new(SECRET_SALT, (label+"|"+s).encode(), "sha256").digest()[:8], "big")
 
-        def overlaps_any_protected(s, e, spans):
-            for cs, ce in spans:
-                if self._spans_overlap(s, e, cs, ce):
-                    return True
-            return False
+FIRST_NAMES = ["Alex","Casey","Jordan","Taylor","Riley","Avery","Drew","Morgan","Quinn","Reese"]
+LAST_NAMES  = ["Smith","Johnson","Lee","Brown","Davis","Miller","Wilson","Moore","Clark","Young"]
 
-        ent_spans = []
-        for ent in self.doc.ents:
-            if not overlaps_any(ent.start_char, ent.end_char, custom_spans) and not overlaps_any_protected(ent.start_char, ent.end_char, label_spans):
-                ent_spans.append((ent.start_char, ent.end_char, ent.label_))
+def surrogate_for(label, original_text, counters):
+    # Simple placeholder labels with counters
+    if label in counters:
+        counters[label] += 1
+    else:
+        counters[label] = 1
+    
+    return f"[{label}{counters[label]}]"
 
-        # 3) Combine and replace from end to start to keep indices valid
-        all_spans = custom_spans + ent_spans
-        all_spans.sort(key=lambda x: x[0])
+def merge_and_dedupe_spans(text, spans):
+    # Remove overlaps and invalid spans
+    valid_spans = []
+    for s in spans:
+        # Skip invalid spans
+        if s.start < 0 or s.end > len(text) or s.start >= s.end:
+            continue
+        valid_spans.append(s)
+    
+    # Sort by start position, then by length (prefer longer spans)
+    valid_spans = sorted(valid_spans, key=lambda s: (s.start, -(s.end - s.start)))
+    
+    kept = []
+    for s in valid_spans:
+        # Check if this span overlaps with any already kept span
+        overlaps = False
+        for k in kept:
+            if not (s.end <= k.start or s.start >= k.end):  # overlaps
+                overlaps = True
+                break
+        if not overlaps:
+            kept.append(s)
+    
+    # Sort final result by start position
+    return sorted(kept, key=lambda s: s.start)
 
-        for start, end, label in reversed(all_spans):
-            base_label = self.label_mapping.get(label, label)
-            if base_label not in self.entity_counters:
-                self.entity_counters[base_label] = 0
-            self.entity_counters[base_label] += 1
-            placeholder = f"[{base_label}{self.entity_counters[base_label]}]"
-            anonymized_doc = anonymized_doc[:start] + placeholder + anonymized_doc[end:]
-            
-        return anonymized_doc
+def anonymize(text, use_llm=False, debug=False):
+    regex_spans = find_regex_spans(text)
+    llm_spans = ask_ollama_for_spans(text) if use_llm else []
+    
+    if debug:
+        print("DEBUG - Regex spans:")
+        for s in regex_spans:
+            print(f"  {s.label}: '{text[s.start:s.end]}' ({s.start}-{s.end})")
+        print("DEBUG - LLM spans:")
+        for s in llm_spans:
+            print(f"  {s.label}: '{text[s.start:s.end]}' ({s.start}-{s.end})")
+    
+    all_spans = merge_and_dedupe_spans(text, regex_spans + llm_spans)
+    
+    if debug:
+        print("DEBUG - Final spans after merge:")
+        for s in all_spans:
+            print(f"  {s.label}: '{text[s.start:s.end]}' ({s.start}-{s.end})")
 
+    mapping = {}  # original->surrogate (store hashed key in prod)
+    counters = {}  # track entity counts for numbering
+    out = []
+    i = 0
+    for s in all_spans:
+        out.append(text[i:s.start])
+        original = text[s.start:s.end]
+        if original not in mapping:
+            mapping[original] = surrogate_for(s.label, original, counters)
+        out.append(mapping[original])
+        i = s.end
+    out.append(text[i:])
+    return "".join(out), mapping, all_spans
 
+def save_mapping_to_file(mapping: dict, filename: str) -> None:
+    """Save the mapping dictionary to a JSON file for deanonymization."""
+    import json
+    with open(filename, 'w') as f:
+        json.dump(mapping, f, indent=2)
+    print(f"Mapping saved to {filename}")
+
+# Example
 if __name__ == "__main__":
-    anonymizer = Anonymizer()
-    text = """My name is John Doe and I live in 123 Main St, Los Angeles, USA. I work at Google, and my salary is $100,000. 
-    My daughter's name is Alice Doe and she lives in 456 Oak Avenue, New York City, USA.
-    If you need to contact me, you can reach me at john.doe@example.com.
-    My phone number is 123-456-7890.
-    My social security number is 123-45-6789.
-    My credit card number is 1234-5678-9012-3456.
-    My bank account routing number is 1234567890.
-    My passport number is 1234567890.
-    My driver's license number is 1234567890.
-    My social security number is 123-45-6789.
-    My credit card number is 1234-5678-9012-3456.
+    doc = """
+    I’m circulating a narrative summary of the July–August accounting close and a request to confirm several upcoming wires and membership allocations. Please treat the contents below as TEST DATA; use it to validate your PII redaction workflows and indexing parsers.
+
+Over the reporting period, Fund Alpha Partners LP (Fund Reg ID: FA-2024-0009 — TEST) recorded a preliminary net asset value (NAV) of $125,342,987 as of 2025-08-31. This figure reflects realized gains from dispersion trades and a small FX loss on the EUR/USD hedges. The back-office notes show three wires scheduled for capital calls and reimbursements:
+    PRIVACY NOTE (for your pipeline tests): The paperwork also contains personally identifying information that is common in investor onboarding — tax IDs, passport numbers, residency addresses (e.g., Sophia’s mailing address above), and occasional scanned driver’s licenses for employees (e.g., employee Marcus D. Li, DL: D-LI-009-2023 — TEST). Ensure your anonymizer preserves formatting of masked financial tokens (e.g., masks like **** **** **** 4242), keeps date formats intact, and deterministically maps repeated identifiers to the same pseudonym across documents.
     """
-
-    text2 = """
-    9823 Capital LLC Employee Records - Confidential
-
-1. Name: Johnathan Miller
-   SSN: 512-48-9237
-   Address: 1456 Oakridge Lane, Denver, CO 80203
-   Phone: (303) 555-7284
-   Email: [jmiller1984@examplemail.com](mailto:jmiller1984@examplemail.com)
-   DOB: 03/14/1984
-
-2. Name: Sarah L. Thompson
-   SSN: 238-66-1092
-   Address: 782 Willow Creek Rd, Austin, TX 73301
-   Phone: 512-777-9912
-   Email: [sarah.thompson@workmail.org](mailto:sarah.thompson@workmail.org)
-   DOB: 09/21/1990
-
-3. Name: Rajesh Patel
-   SSN: 449-19-3348
-   Address: 2201 Maple Avenue Apt 5B, New York, NY 10016
-   Phone: 917-222-4401
-   Email: [rpatel77@personalmail.net](mailto:rpatel77@personalmail.net)
-   DOB: 07/07/1977
-
-4. Name: Emily Carter
-   SSN: 155-73-8245
-   Address: 950 Bayshore Blvd, San Francisco, CA 94124
-   Phone: 415-389-5562
-   Email: [ecarter.sf@businessco.com](mailto:ecarter.sf@businessco.com)
-   DOB: 12/02/1988
-
-5. Name: Michael Rodriguez
-   SSN: 601-54-2109
-   Address: 321 Pine Street, Miami, FL 33130
-   Phone: 305-833-4509
-   Email: [mike.rodriguez305@mailservice.com](mailto:mike.rodriguez305@mailservice.com)
-   DOB: 05/27/1982
-
----
-
-This document contains fabricated sensitive information for testing anonymization systems only.
-
-    """
-    anonymized_doc = anonymizer.anonymize_data(text2)
-    print(anonymized_doc)
+    anon, mapping, spans = anonymize(doc, use_llm=True, debug=False)
+    print(anon)
+    print(mapping)
